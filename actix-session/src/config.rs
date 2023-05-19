@@ -26,6 +26,9 @@ pub enum SessionLifecycle {
     ///
     /// [persistent cookie]: https://www.whitehatsec.com/glossary/content/persistent-session-cookie
     PersistentSession(PersistentSession),
+
+    /// The session cookie will be a [persistent cookie] which has two phases.
+    TwoPhaseSession(TwoPhaseSession),
 }
 
 /// A [session lifecycle](SessionLifecycle) strategy where the session cookie expires when the
@@ -158,6 +161,57 @@ impl Default for PersistentSession {
     }
 }
 
+/// A [session lifecycle](SessionLifecycle) strategy derived on [persistent].
+#[derive(Debug, Clone)]
+pub struct TwoPhaseSession {
+    ephemeral_ttl: Duration,
+    session_ttl: Duration,
+    ttl_extension_policy: TtlExtensionPolicy,
+}
+
+impl TwoPhaseSession {
+    /// Specifies how long the session cookie should live at phase-1(which shouldn't be long).
+    pub fn ephemeral_ttl(mut self, ttl: Duration) -> Self {
+        self.ephemeral_ttl = ttl;
+        self
+    }
+
+    /// Specifies how long the session cookie should live at phase-2.
+    ///
+    /// The session TTL is also used as the TTL for the session state in the storage backend.
+    ///
+    /// Defaults to 1 day.
+    ///
+    /// A persistent session can live more than the specified TTL if the TTL is extended.
+    /// See [`session_ttl_extension_policy`](Self::session_ttl_extension_policy) for more details.
+    pub fn session_ttl(mut self, session_ttl: Duration) -> Self {
+        self.session_ttl = session_ttl;
+        self
+    }
+
+    /// Determines under what circumstances the TTL of your session should be extended.
+    /// See [`TtlExtensionPolicy`] for more details.
+    ///
+    /// Defaults to [`TtlExtensionPolicy::OnStateChanges`].
+    pub fn session_ttl_extension_policy(
+        mut self,
+        ttl_extension_policy: TtlExtensionPolicy,
+    ) -> Self {
+        self.ttl_extension_policy = ttl_extension_policy;
+        self
+    }
+}
+
+impl Default for TwoPhaseSession {
+    fn default() -> Self {
+        Self {
+            ephemeral_ttl: default_ttl_short(),
+            session_ttl: default_ttl(),
+            ttl_extension_policy: default_ttl_extension_policy(),
+        }
+    }
+}
+
 /// Configuration for which events should trigger an extension of the time-to-live for your session.
 ///
 /// If you are using a [`BrowserSession`], `TtlExtensionPolicy` controls how often the TTL of the
@@ -199,6 +253,10 @@ pub enum CookieContentSecurity {
     /// Signing guarantees integrity, but it doesn't ensure confidentiality: the client cannot
     /// tamper with the cookie content, but they can read it.
     Signed,
+}
+
+pub(crate) const fn default_ttl_short() -> Duration {
+    Duration::minutes(5)
 }
 
 pub(crate) const fn default_ttl() -> Duration {
@@ -281,6 +339,16 @@ impl<Store: SessionStore> SessionMiddlewareBuilder<Store> {
                 self.configuration.session.state_ttl = session_ttl;
                 self.configuration.ttl_extension_policy = ttl_extension_policy;
             }
+            SessionLifecycle::TwoPhaseSession(TwoPhaseSession {
+                ephemeral_ttl,
+                session_ttl,
+                ttl_extension_policy,
+            }) => {
+                self.configuration.cookie.max_age = Some(session_ttl);
+                self.configuration.session.ephemeral_ttl = ephemeral_ttl;
+                self.configuration.session.state_ttl = session_ttl;
+                self.configuration.ttl_extension_policy = ttl_extension_policy;
+            }
         }
 
         self
@@ -359,6 +427,7 @@ pub(crate) struct Configuration {
 
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
+    pub(crate) ephemeral_ttl: Duration,
     pub(crate) state_ttl: Duration,
 }
 
@@ -389,6 +458,7 @@ pub(crate) fn default_configuration(key: Key) -> Configuration {
             key,
         },
         session: SessionConfiguration {
+            ephemeral_ttl: default_ttl_short(),
             state_ttl: default_ttl(),
         },
         ttl_extension_policy: default_ttl_extension_policy(),

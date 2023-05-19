@@ -3,7 +3,7 @@ use std::{collections::HashMap, convert::TryInto, fmt, future::Future, pin::Pin,
 use actix_utils::future::{ready, Ready};
 use actix_web::{
     body::MessageBody,
-    cookie::{Cookie, CookieJar, Key},
+    cookie::{time::Duration, Cookie, CookieJar, Key},
     dev::{forward_ready, ResponseHead, Service, ServiceRequest, ServiceResponse, Transform},
     http::header::{HeaderValue, SET_COOKIE},
     HttpResponse,
@@ -221,45 +221,53 @@ where
             Session::set_session(&mut req, session_state);
 
             let mut res = service.call(req).await?;
-            let (status, session_state) = Session::get_changes(&mut res);
+            let (status, session_state, is_ephemeral) = Session::get_changes(&mut res);
+
+            fn get_seesion_cookie_cfg(
+                is_ephemeral: bool,
+                configuration: &Configuration,
+            ) -> (&Duration, CookieConfiguration) {
+                if !is_ephemeral {
+                    (
+                        &configuration.session.state_ttl,
+                        configuration.cookie.clone(),
+                    )
+                } else {
+                    let ttl = &configuration.session.ephemeral_ttl;
+                    let mut cfg = configuration.cookie.clone();
+                    cfg.max_age = Some(ttl.clone());
+                    (ttl, cfg)
+                }
+            }
 
             match session_key {
                 None => {
                     // we do not create an entry in the session store if there is no state attached
                     // to a fresh session
                     if !session_state.is_empty() {
+                        let (ttl, config) = get_seesion_cookie_cfg(is_ephemeral, &configuration);
                         let session_key = storage_backend
-                            .save(session_state, &configuration.session.state_ttl)
+                            .save(session_state, ttl)
                             .await
                             .map_err(e500)?;
 
-                        set_session_cookie(
-                            res.response_mut().head_mut(),
-                            session_key,
-                            &configuration.cookie,
-                        )
-                        .map_err(e500)?;
+                        set_session_cookie(res.response_mut().head_mut(), session_key, &config)
+                            .map_err(e500)?;
                     }
                 }
 
                 Some(session_key) => {
                     match status {
                         SessionStatus::Changed => {
+                            let (ttl, config) =
+                                get_seesion_cookie_cfg(is_ephemeral, &configuration);
                             let session_key = storage_backend
-                                .update(
-                                    session_key,
-                                    session_state,
-                                    &configuration.session.state_ttl,
-                                )
+                                .update(session_key, session_state, ttl)
                                 .await
                                 .map_err(e500)?;
 
-                            set_session_cookie(
-                                res.response_mut().head_mut(),
-                                session_key,
-                                &configuration.cookie,
-                            )
-                            .map_err(e500)?;
+                            set_session_cookie(res.response_mut().head_mut(), session_key, &config)
+                                .map_err(e500)?;
                         }
 
                         SessionStatus::Purged => {
@@ -292,7 +300,9 @@ where
                             if matches!(
                                 configuration.ttl_extension_policy,
                                 TtlExtensionPolicy::OnEveryRequest
-                            ) {
+                            ) && !is_ephemeral
+                            // do not extend ephemeral
+                            {
                                 storage_backend
                                     .update_ttl(&session_key, &configuration.session.state_ttl)
                                     .await

@@ -77,6 +77,7 @@ impl Default for SessionStatus {
 struct SessionInner {
     state: HashMap<String, String>,
     status: SessionStatus,
+    is_ephemeral: bool,
 }
 
 impl Session {
@@ -214,6 +215,12 @@ impl Session {
         }
     }
 
+    /// Mark session as ephemeral
+    pub fn make_ephemeral(&self) {
+        let mut inner = self.0.borrow_mut();
+        inner.is_ephemeral = true;
+    }
+
     /// Adds the given key-value pairs to the session on the request.
     ///
     /// Values that match keys already existing on the session will be overwritten. Values should
@@ -234,16 +241,20 @@ impl Session {
     /// finalised (i.e. in `SessionMiddleware`).
     pub(crate) fn get_changes<B>(
         res: &mut ServiceResponse<B>,
-    ) -> (SessionStatus, HashMap<String, String>) {
+    ) -> (SessionStatus, HashMap<String, String>, bool) {
         if let Some(s_impl) = res
             .request()
             .extensions()
             .get::<Rc<RefCell<SessionInner>>>()
         {
             let state = mem::take(&mut s_impl.borrow_mut().state);
-            (s_impl.borrow().status.clone(), state)
+            (
+                s_impl.borrow().status.clone(),
+                state,
+                s_impl.borrow().is_ephemeral,
+            )
         } else {
-            (SessionStatus::Unchanged, HashMap::new())
+            (SessionStatus::Unchanged, HashMap::new(), false)
         }
     }
 
